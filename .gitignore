@@ -1,8 +1,5 @@
 .idea
 .DS_Store
-dist/
-*.so
-*.h
 .gocache/
 .gomodcache/
 .gopath/
