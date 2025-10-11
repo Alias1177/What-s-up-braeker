@@ -1,0 +1,8 @@
+include go.mod
+include go.sum
+include readme.md
+include python/src/build_backend.py
+recursive-include cmd *.go
+recursive-include pkg *.go
+recursive-include examples *.py
+exclude dist/*

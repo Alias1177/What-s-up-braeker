@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whatsupbraeker"
+version = "0.1.0"
+description = "Python bindings for the WhatsUpBraeker Go WhatsApp bridge."
+readme = "readme.md"
+requires-python = ">=3.9"
+license = "LicenseRef-Proprietary"
+keywords = ["whatsapp", "whatsupbraeker", "bridge"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: MacOS",
+]
+
+[tool.setuptools]
+package-dir = {"" = "python/src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["python/src"]
+
+[tool.setuptools.cmdclass]
+build_go = "build_backend.build_go"
+build_py = "build_backend.build_py"
+bdist_wheel = "build_backend.bdist_wheel"
+
+[tool.setuptools.package-data]
+whatsupbraeker = ["lib/libwa.*"]

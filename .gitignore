@@ -3,4 +3,8 @@
 .gocache/
 .gomodcache/
 .gopath/
+.venv-test
+dist
 whatsapp.db
+python/src/whatsupbraeker.egg-info/
+python/src/whatsupbraeker/lib/

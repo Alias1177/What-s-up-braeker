@@ -1,0 +1,14 @@
+MANIFEST.in
+go.mod
+go.sum
+pyproject.toml
+readme.md
+cmd/wa-bridge/main.go
+examples/python/client.py
+pkg/waclient/runner.go
+python/src/build_backend.py
+python/src/whatsupbraeker/__init__.py
+python/src/whatsupbraeker.egg-info/PKG-INFO
+python/src/whatsupbraeker.egg-info/SOURCES.txt
+python/src/whatsupbraeker.egg-info/dependency_links.txt
+python/src/whatsupbraeker.egg-info/top_level.txt

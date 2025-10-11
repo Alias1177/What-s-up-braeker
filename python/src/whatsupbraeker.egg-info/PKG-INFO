@@ -1,0 +1,64 @@
+Metadata-Version: 2.4
+Name: whatsupbraeker
+Version: 0.1.0
+Summary: Python bindings for the WhatsUpBraeker Go WhatsApp bridge.
+License-Expression: LicenseRef-Proprietary
+Keywords: whatsapp,whatsupbraeker,bridge
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Operating System :: MacOS
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
+# What-s-up-braeker
+
+Go-библиотека для работы с [WhatsApp](https://www.whatsapp.com/) через [`whatsmeow`](https://github.com/tulir/whatsmeow). Пакет предоставляет минимальный API, пригодный для собственных Go-приложений и для использования через `ctypes` в Python.
+
+## Структура проекта
+- `pkg/waclient` — основная логика соединения, отправки и получения сообщений.
+- `cmd/wa-bridge` — точка сборки `c-shared`, экспортирующая функции `WaRun` и `WaFree`.
+- `examples/python/client.py` — пример вызова общей библиотеки из Python.
+- `main.go` — демонстрация использования пакета напрямую из Go.
+
+## Использование в Go
+```bash
+go run ./main.go
+```
+Перед запуском задайте номер телефона и текст сообщения в `main.go`. При первой авторизации появится QR-код, который нужно отсканировать в WhatsApp.
+
+Чтобы подключить библиотеку в другом проекте:
+```go
+import "github.com/Alias1177/What-s-up-braeker/pkg/waclient"
+```
+
+## Сборка динамической библиотеки
+```bash
+mkdir -p dist
+go build -buildmode=c-shared -o dist/libwa.so ./cmd/wa-bridge
+```
+Команда создаст `dist/libwa.so` и заголовок `dist/libwa.h`. В средах с ограниченными правами на запись в глобальные кэши можно использовать локальные каталоги:
+```bash
+GOTOOLCHAIN=go1.24.0 \
+GOMODCACHE=$PWD/.gomodcache \
+GOCACHE=$PWD/.gocache \
+go build -buildmode=c-shared -o dist/libwa.so ./cmd/wa-bridge
+```
+
+## Пример на Python
+После сборки библиотеки:
+```bash
+python3 examples/python/client.py \
+  --phone 79991234567 \
+  --message "Hello from Python!"
+```
+Флаг `--lib` позволяет указать путь к `.so`, а `--db-uri` — строку подключения к SQLite с сохранённой сессией WhatsApp.
+
+## Требования
+- Go 1.24+ (для зависимостей `whatsmeow`);
+- база WhatsApp (`whatsapp.db`) рядом с бинарём;
+- Python 3.8+ (для примера).
+
+## Примечания
+- В `pkg/waclient.Config` можно управлять тайм-аутами, логами и выводом QR.
+- `WaRun` возвращает JSON со статусом, ID отправленного сообщения, собранными в сессии сообщениями и флагом `requires_qr`.
