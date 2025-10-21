@@ -26,9 +26,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="SQLite connection string with WhatsApp session data.",
     )
     parser.add_argument(
-        "--phone",
+        "--account-phone",
         required=True,
-        help="Recipient phone in international format without '+'.",
+        help="WhatsApp account phone (used for the session / QR pairing).",
+    )
+    parser.add_argument(
+        "--recipient",
+        help="Phone or JID of the chat to send to.",
     )
     parser.add_argument(
         "--message",
@@ -52,11 +56,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="How long to listen for messages (fractional seconds allowed).",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Skip sending a message and only collect incoming messages.",
+    )
+    parser.add_argument(
+        "--read-limit",
+        type=int,
+        default=None,
+        help="Maximum number of messages to collect (default is library-controlled).",
+    )
+    parser.add_argument(
+        "--listen-seconds",
+        type=float,
+        default=None,
+        help="How long to listen for messages (fractional seconds allowed).",
+    )
+    parser.add_argument(
+        "--read-chat",
+        default=None,
+        help="Phone or JID of the chat to collect messages from (defaults to recipient).",
+    )
+    parser.add_argument(
+        "--show-qr",
+        action="store_true",
+        help="Print QR codes when login is required.",
+    )
+    parser.add_argument(
+        "--force-relink",
+        action="store_true",
+        help="Force the stored session to be cleared and request a new QR link.",
+    )
+    args = parser.parse_args(argv)
+    return parser, args
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    parser, args = parse_args(argv)
 
     lib_path = Path(args.lib)
     if not lib_path.is_absolute():

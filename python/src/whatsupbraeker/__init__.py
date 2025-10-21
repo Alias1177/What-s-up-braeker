@@ -40,6 +40,7 @@ class WaResult:
     error: Optional[str]
     message_id: Optional[str]
     last_messages: list[str]
+    requires_qr: bool
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "WaResult":
@@ -49,6 +50,7 @@ class WaResult:
             error=data.get("error"),
             message_id=data.get("message_id"),
             last_messages=list(data.get("last_messages") or []),
+            requires_qr=bool(data.get("requires_qr", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,6 +60,7 @@ class WaResult:
             "error": self.error,
             "message_id": self.message_id,
             "last_messages": list(self.last_messages),
+            "requires_qr": self.requires_qr,
         }
 
 
@@ -76,11 +79,11 @@ class WaBridge:
         self._lib.WaFree.argtypes = [ctypes.c_char_p]
         self._lib.WaFree.restype = None
 
-    def run(self, db_uri: str, phone: str, message: str) -> WaResult:
+    def run(self, db_uri: str, account_phone: str, message: str) -> WaResult:
         """Call the Go bridge and return the structured response."""
         ptr = self._lib.WaRun(
             db_uri.encode("utf-8"),
-            phone.encode("utf-8"),
+            account_phone.encode("utf-8"),
             message.encode("utf-8"),
         )
         if not ptr:
@@ -117,13 +120,13 @@ def load_library(path: Optional[Union[str, Path]] = None) -> WaBridge:
 
 def run(
     db_uri: str,
-    phone: str,
+    account_phone: str,
     message: str,
     *,
     library: Optional[Union[str, Path]] = None,
 ) -> MutableMapping[str, Any]:
     """Convenience helper mirroring the struct returned by the Go library."""
-    result = load_library(library).run(db_uri, phone, message)
+    result = load_library(library).run(db_uri, account_phone, message)
     return result.to_dict()
 
 

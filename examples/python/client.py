@@ -24,9 +24,13 @@ def main(argv: list[str] | None = None) -> int:
         help="SQLite connection string with WhatsApp session data.",
     )
     parser.add_argument(
-        "--phone",
+        "--account-phone",
         required=True,
-        help="Recipient phone in the international format without '+'.",
+        help="WhatsApp account phone number (used for QR pairing).",
+    )
+    parser.add_argument(
+        "--recipient",
+        help="Phone or JID of the chat to send to.",
     )
     parser.add_argument(
         "--message",

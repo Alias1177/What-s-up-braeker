@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unsafe"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -28,6 +30,7 @@ type Response struct {
 	Error        string   `json:"error,omitempty"`
 	MessageID    string   `json:"message_id,omitempty"`
 	LastMessages []string `json:"last_messages,omitempty"`
+	RequiresQR   bool     `json:"requires_qr,omitempty"`
 }
 
 const (
@@ -227,7 +230,13 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 	handlerID := client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			if v.Message == nil {
+			if collector == nil || v.Message == nil {
+				return
+			}
+			if v.Info.Chat == nil {
+				return
+			}
+			if haveReadTarget && !v.Info.Chat.Equal(readTarget) {
 				return
 			}
 			if v.Info.Chat == nil || !v.Info.Chat.Equal(targetJID) {
@@ -250,18 +259,65 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 	})
 	defer client.RemoveEventHandler(handlerID)
 
-	// Подключаемся
-	err = client.Connect()
-	if err != nil {
-		resp.Status = "error"
-		resp.Error = fmt.Sprintf("failed to connect: %v", err)
-		return marshalResponse(resp)
-	}
-	defer client.Disconnect()
+	connected := false
+	defer func() {
+		if connected {
+			client.Disconnect()
+		}
+	}()
 
-	fmt.Println("✅ Подключено к WhatsApp!")
-	fmt.Println("Жду стабилизации соединения...")
-	time.Sleep(3 * time.Second)
+	resp.RequiresQR = client.Store.ID == nil
+	if resp.RequiresQR {
+		fmt.Printf("ℹ️ Требуется авторизация через QR-код для %s\n", accountJIDString)
+	}
+	if client.Store.ID == nil {
+		qrChan, _ := client.GetQRChannel(context.Background())
+		if err = client.Connect(); err != nil {
+			resp.Status = "error"
+			resp.Error = fmt.Sprintf("failed to connect (qr): %v", err)
+			return marshalResponse(resp)
+		}
+		connected = true
+		for evt := range qrChan {
+			switch evt.Event {
+			case "code":
+				if cfg.ShowQR {
+					fmt.Println("📱 Отсканируйте QR-код в WhatsApp:")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				} else {
+					fmt.Println("ℹ️ Получен QR-код (show_qr=false, вывод пропущен)")
+				}
+			case "scan":
+				fmt.Println("📸 QR-код отсканирован, ожидаем подтверждения...")
+			case "timeout":
+				fmt.Println("⏳ Срок действия QR истёк, получаем новый...")
+			case "success":
+				fmt.Println("✅ Авторизация по QR завершена")
+			default:
+				fmt.Printf("ℹ️ Событие QR: %s\n", evt.Event)
+			}
+		}
+		fmt.Println("ℹ️ QR-канал закрыт, продолжаем работу")
+		fmt.Println("✅ Подключено к WhatsApp!")
+	} else {
+		if err = client.Connect(); err != nil {
+			resp.Status = "error"
+			resp.Error = fmt.Sprintf("failed to connect: %v", err)
+			return marshalResponse(resp)
+		}
+		connected = true
+		fmt.Println("✅ Подключено к WhatsApp!")
+	}
+
+	if cfg.ShouldSend || cfg.ShouldListen {
+		fmt.Println("Жду стабилизации соединения...")
+		time.Sleep(3 * time.Second)
+	}
+
+	if cfg.ShouldSend {
+		fmt.Printf("📤 Отправляю сообщение...\n")
+		fmt.Printf("   Текст для отправки: '%s'\n", cfg.SendText)
+		fmt.Printf("   Получателю: %s\n", sendTarget.String())
 
 	if cfg.ShouldSend {
 		fmt.Printf("📤 Отправляю сообщение...\n")
