@@ -36,10 +36,51 @@ go build -buildmode=c-shared -o dist/libwa.so ./cmd/wa-bridge
 После сборки библиотеки:
 ```bash
 python3 examples/python/client.py \
-  --phone 79991234567 \
-  --message "Hello from Python!"
+  --account-phone 79991234567 \
+  --recipient 79990001122 \
+  --message "Hello from Python!" \
+  --read-limit 5 \
+  --listen-seconds 8 \
+  --show-qr
 ```
-Флаг `--lib` позволяет указать путь к `.so`, а `--db-uri` — строку подключения к SQLite с сохранённой сессией WhatsApp.
+Флаги `--read-limit` и `--listen-seconds` позволяют регулировать, сколько входящих сообщений будет собрано и как долго ждать ответов. Передайте `--read-only`, чтобы ничего не отправлять и просто прочитать чат. Флаг `--lib` позволяет указать путь к `.so`, `--db-uri` — строку подключения к SQLite с сохранённой сессией WhatsApp, `--show-qr` заставит бридж печатать QR-код, когда требуется авторизация, а `--force-relink` очищает текущую сессию и инициирует новую привязку по QR.
+
+### Использование в собственном скрипте Python
+
+```python
+from pathlib import Path
+
+from python import WhatsAppBridge
+
+bridge = WhatsAppBridge(Path("dist/libwa.so"))
+
+# Отправить сообщение и подождать до 3 ответов не дольше 15 секунд
+response = bridge.send_message(
+    db_uri="file:whatsapp.db?_foreign_keys=on",
+    account_phone="79991234567",
+    recipient="79990001122",
+    text="Привет!",
+    read_limit=3,
+    listen_seconds=15,
+)
+
+# Только прочитать сообщения — будет использован JSON-пейлоад без текста
+history = bridge.read_messages(
+    db_uri="file:whatsapp.db?_foreign_keys=on",
+    account_phone="79991234567",
+    chat="79990001122",
+    read_limit=10,
+)
+```
+Под капотом `WhatsAppBridge` формирует JSON-параметры для функции `WaRun`. Доступные поля:
+
+- `send_text` — текст сообщения, который нужно отправить (если опущен, работает режим чтения);
+- `recipient` — номер или JID чата, куда нужно отправить сообщение;
+- `read_chat` — номер или JID чата, из которого следует читать сообщения (по умолчанию совпадает с `recipient`);
+- `read_limit` — сколько входящих сообщений вернуть (по умолчанию библиотека берёт разумное значение);
+- `listen_seconds` — максимальное время ожидания новых сообщений (дробное число секунд);
+- `show_qr` — печатать ли QR-коды в консоли, когда требуется авторизация (существующая сессия повторно не сбрасывается);
+- `force_relink` — очищает сохранённую сессию и заставляет библиотеку запросить новый QR для указанного `account_phone`.
 
 ## Требования
 - Go 1.24+ (для зависимостей `whatsmeow`);
@@ -49,3 +90,4 @@ python3 examples/python/client.py \
 ## Примечания
 - В `pkg/waclient.Config` можно управлять тайм-аутами, логами и выводом QR.
 - `WaRun` возвращает JSON со статусом, ID отправленного сообщения, собранными в сессии сообщениями и флагом `requires_qr`.
+- При необходимости можно передать JSON-строку напрямую в `message` (например, `{"send_text":"hi","read_limit":5}`).
