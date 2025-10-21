@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -43,25 +42,17 @@ const (
 
 type runPayload struct {
 	SendText      string  `json:"send_text,omitempty"`
-	Recipient     string  `json:"recipient,omitempty"`
-	ReadChat      string  `json:"read_chat,omitempty"`
 	ReadLimit     int     `json:"read_limit,omitempty"`
 	ListenSeconds float64 `json:"listen_seconds,omitempty"`
-	ShowQR        bool    `json:"show_qr,omitempty"`
-	ForceRelink   bool    `json:"force_relink,omitempty"`
 }
 
 type normalizedConfig struct {
 	SendText          string
 	ShouldSend        bool
-	Recipient         string
 	ShouldListen      bool
-	ReadChat          string
 	ReadLimit         int
 	ListenDuration    time.Duration
 	explicitReadLimit bool
-	ShowQR            bool
-	ForceRelink       bool
 }
 
 type messageCollector struct {
@@ -131,22 +122,13 @@ func parseRunPayload(raw string) (runPayload, bool, error) {
 }
 
 func normalizeConfig(raw string) (normalizedConfig, error) {
-	payload, _, err := parseRunPayload(raw)
+	payload, payloadProvided, err := parseRunPayload(raw)
 	if err != nil {
 		return normalizedConfig{}, fmt.Errorf("invalid request payload: %w", err)
 	}
 
 	sendText := strings.TrimSpace(payload.SendText)
-	recipient := strings.TrimSpace(payload.Recipient)
-	if sendText != "" && recipient == "" {
-		return normalizedConfig{}, fmt.Errorf("recipient is required when send_text is provided")
-	}
-	shouldSend := sendText != "" && recipient != ""
-
-	readChat := strings.TrimSpace(payload.ReadChat)
-	if readChat == "" {
-		readChat = recipient
-	}
+	shouldSend := sendText != ""
 
 	readLimit := payload.ReadLimit
 	explicitReadLimit := readLimit != 0
@@ -161,38 +143,24 @@ func normalizeConfig(raw string) (normalizedConfig, error) {
 
 	listenDuration := time.Duration(listenSeconds * float64(time.Second))
 
-	shouldListen := readChat != "" || readLimit > 0 || listenDuration > 0
-	if shouldListen {
-		if listenDuration <= 0 {
-			listenDuration = time.Duration(defaultListenSeconds * float64(time.Second))
-		}
-		if readLimit == 0 && !explicitReadLimit && listenSeconds == 0 {
+	shouldListen := readLimit != 0 || listenDuration > 0 || !shouldSend
+	if shouldListen && listenDuration <= 0 {
+		listenDuration = time.Duration(defaultListenSeconds * float64(time.Second))
+	}
+
+	if shouldListen && readLimit == 0 && !explicitReadLimit {
+		if listenSeconds == 0 && (payloadProvided || !shouldSend) {
 			readLimit = defaultReadLimit
 		}
-	}
-
-	showQR := payload.ShowQR
-	forceRelink := payload.ForceRelink
-
-	if !shouldSend && !shouldListen && !showQR && !forceRelink {
-		return normalizedConfig{}, fmt.Errorf("nothing to do: provide send_text, listening options, show_qr, or force_relink")
-	}
-
-	if shouldListen && readChat == "" {
-		return normalizedConfig{}, fmt.Errorf("read_chat or recipient is required when listening for messages")
 	}
 
 	return normalizedConfig{
 		SendText:          sendText,
 		ShouldSend:        shouldSend,
-		Recipient:         recipient,
 		ShouldListen:      shouldListen,
-		ReadChat:          readChat,
 		ReadLimit:         readLimit,
 		ListenDuration:    listenDuration,
 		explicitReadLimit: explicitReadLimit,
-		ShowQR:            showQR,
-		ForceRelink:       forceRelink,
 	}, nil
 }
 
@@ -223,14 +191,6 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 	resp := &Response{Status: "ok"}
 	ctx := context.Background()
 
-	accountJID, err := parseAccountIdentifier(goPhone)
-	if err != nil {
-		resp.Status = "error"
-		resp.Error = fmt.Sprintf("invalid account phone: %v", err)
-		return marshalResponse(resp)
-	}
-	accountJIDString := accountJID.String()
-
 	cfg, err := normalizeConfig(goMessage)
 	if err != nil {
 		resp.Status = "error"
@@ -238,9 +198,9 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 		return marshalResponse(resp)
 	}
 
-	if !cfg.ShouldSend && !cfg.ShouldListen && !cfg.ShowQR && !cfg.ForceRelink {
+	if !cfg.ShouldSend && !cfg.ShouldListen {
 		resp.Status = "error"
-		resp.Error = "nothing to do: provide send_text, listening options, show_qr, or force_relink"
+		resp.Error = "nothing to do: provide send_text or listening options"
 		return marshalResponse(resp)
 	}
 
@@ -263,75 +223,9 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 
 	client := whatsmeow.NewClient(deviceStore, log)
 
-	resetSession := false
-	if existing := client.Store.ID; existing != nil {
-		if existing.String() != accountJIDString {
-			if cfg.ForceRelink {
-				fmt.Printf("⚠️ Сохранённая сессия относится к %s, запрошен доступ для %s. Перепривязываю...\n", existing.String(), accountJIDString)
-				resetSession = true
-			} else {
-				resp.Status = "error"
-				resp.Error = fmt.Sprintf("stored session is linked to %s, but %s was requested; rerun with force_relink=true to re-authorize", existing.String(), accountJIDString)
-				return marshalResponse(resp)
-			}
-		} else if cfg.ForceRelink {
-			fmt.Printf("🔁 Запрошена перепривязка для %s, сбрасываю текущую сессию...\n", accountJIDString)
-			resetSession = true
-		} else if cfg.ShowQR {
-			fmt.Printf("ℹ️ show_qr=true, но сессия для %s уже активна — QR не требуется. Используйте force_relink=true, если нужно перепривязать.\n", accountJIDString)
-		}
-	} else {
-		if cfg.ForceRelink {
-			fmt.Printf("ℹ️ force_relink=true указан для %s, но сохранённой сессии нет — продолжаю стандартную авторизацию.\n", accountJIDString)
-		}
-		if cfg.ShowQR {
-			fmt.Printf("ℹ️ Для %s нет активной сессии — QR будет показан после подключения\n", accountJIDString)
-		}
-	}
+	targetJID := types.NewJID(goPhone, types.DefaultUserServer)
 
-	if resetSession {
-		if err := client.Store.Delete(ctx); err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("failed to reset stored session: %v", err)
-			return marshalResponse(resp)
-		}
-
-		deviceStore, err = container.GetFirstDevice(ctx)
-		if err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("failed to prepare device after reset: %v", err)
-			return marshalResponse(resp)
-		}
-		client = whatsmeow.NewClient(deviceStore, log)
-	}
-
-	var sendTarget types.JID
-	if cfg.ShouldSend {
-		target, err := parseChatIdentifier(cfg.Recipient)
-		if err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("invalid recipient: %v", err)
-			return marshalResponse(resp)
-		}
-		sendTarget = target
-	}
-
-	var (
-		readTarget     types.JID
-		haveReadTarget bool
-		collector      *messageCollector
-	)
-	if cfg.ShouldListen {
-		target, err := parseChatIdentifier(cfg.ReadChat)
-		if err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("invalid read_chat: %v", err)
-			return marshalResponse(resp)
-		}
-		readTarget = target
-		haveReadTarget = true
-		collector = newMessageCollector(cfg.ReadLimit, determineBufferCap(cfg.ReadLimit))
-	}
+	collector := newMessageCollector(cfg.ReadLimit, determineBufferCap(cfg.ReadLimit))
 
 	handlerID := client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -343,6 +237,9 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 				return
 			}
 			if haveReadTarget && !v.Info.Chat.Equal(readTarget) {
+				return
+			}
+			if v.Info.Chat == nil || !v.Info.Chat.Equal(targetJID) {
 				return
 			}
 			text := v.Message.GetConversation()
@@ -422,6 +319,11 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 		fmt.Printf("   Текст для отправки: '%s'\n", cfg.SendText)
 		fmt.Printf("   Получателю: %s\n", sendTarget.String())
 
+	if cfg.ShouldSend {
+		fmt.Printf("📤 Отправляю сообщение...\n")
+		fmt.Printf("   Текст для отправки: '%s'\n", cfg.SendText)
+		fmt.Printf("   Получателю: %s\n", goPhone)
+
 		msgToSend := &waProto.Message{
 			Conversation: proto.String(cfg.SendText),
 		}
@@ -435,7 +337,7 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 
 		fmt.Printf("✅ Proto сообщение создано: '%s'\n", *msgToSend.Conversation)
 
-		sendResp, err := client.SendMessage(context.Background(), sendTarget, msgToSend)
+		sendResp, err := client.SendMessage(context.Background(), targetJID, msgToSend)
 		if err != nil {
 			resp.Status = "error"
 			resp.Error = fmt.Sprintf("failed to send: %v", err)
@@ -446,8 +348,8 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 		resp.MessageID = sendResp.ID
 	}
 
-	if collector != nil {
-		listenMsg := fmt.Sprintf("👂 Слушаю входящие сообщения для %s", readTarget.String())
+	if cfg.ShouldListen {
+		listenMsg := fmt.Sprintf("👂 Слушаю входящие сообщения")
 		if cfg.ReadLimit > 0 {
 			listenMsg += fmt.Sprintf(" (до %d сообщений)", cfg.ReadLimit)
 		}
@@ -483,49 +385,8 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 		resp.LastMessages = messages
 	}
 
-	if connected {
-		fmt.Println("Отключаюсь...")
-	}
+	fmt.Println("Отключаюсь...")
 	return marshalResponse(resp)
-}
-
-func parseChatIdentifier(raw string) (types.JID, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return types.JID{}, fmt.Errorf("empty chat identifier")
-	}
-
-	if strings.Contains(trimmed, "@") {
-		jid, err := types.ParseJID(trimmed)
-		if err != nil {
-			return types.JID{}, err
-		}
-		return jid, nil
-	}
-
-	digits := digitsOnly(trimmed)
-	if digits == "" {
-		return types.JID{}, fmt.Errorf("no digits in chat identifier")
-	}
-	return types.NewJID(digits, types.DefaultUserServer), nil
-}
-
-func parseAccountIdentifier(raw string) (types.JID, error) {
-	digits := digitsOnly(strings.TrimSpace(raw))
-	if digits == "" {
-		return types.JID{}, fmt.Errorf("no digits in phone")
-	}
-	return types.NewJID(digits, types.DefaultUserServer), nil
-}
-
-func digitsOnly(raw string) string {
-	var b strings.Builder
-	for _, r := range raw {
-		if unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func marshalResponse(resp *Response) *C.char {

@@ -31,7 +31,7 @@ class WhatsAppBridge:
     def run(
         self,
         db_uri: str,
-        account_phone: str,
+        phone: str,
         payload: Optional[Dict[str, Any] | str] = None,
     ) -> Dict[str, Any]:
         """Invoke the shared library with an optional JSON payload."""
@@ -46,7 +46,7 @@ class WhatsAppBridge:
 
         ptr = self._lib.WaRun(
             db_uri.encode("utf-8"),
-            account_phone.encode("utf-8"),
+            phone.encode("utf-8"),
             message.encode("utf-8"),
         )
         if not ptr:
@@ -65,57 +65,35 @@ class WhatsAppBridge:
     def send_message(
         self,
         db_uri: str,
-        account_phone: str,
-        recipient: str,
+        phone: str,
         text: str,
         *,
-        read_chat: Optional[str] = None,
         read_limit: Optional[int] = None,
         listen_seconds: Optional[float] = None,
-        show_qr: bool = False,
-        force_relink: bool = False,
     ) -> Dict[str, Any]:
-        """Send ``text`` to ``recipient`` and optionally listen for replies."""
+        """Send ``text`` to ``phone`` and optionally listen for replies."""
 
-        payload: Dict[str, Any] = {
-            "send_text": text,
-            "recipient": recipient,
-        }
-        if read_chat:
-            payload["read_chat"] = read_chat
-        else:
-            payload["read_chat"] = recipient
+        payload: Dict[str, Any] = {"send_text": text}
         if read_limit is not None:
             payload["read_limit"] = read_limit
         if listen_seconds is not None:
             payload["listen_seconds"] = listen_seconds
-        if show_qr:
-            payload["show_qr"] = True
-        if force_relink:
-            payload["force_relink"] = True
-        return self.run(db_uri, account_phone, payload)
+        return self.run(db_uri, phone, payload)
 
     def read_messages(
         self,
         db_uri: str,
-        account_phone: str,
-        chat: str,
+        phone: str,
         *,
         read_limit: Optional[int] = None,
         listen_seconds: Optional[float] = None,
-        show_qr: bool = False,
-        force_relink: bool = False,
     ) -> Dict[str, Any]:
-        """Listen to incoming messages from ``chat`` without sending anything."""
+        """Listen to incoming messages without sending anything."""
 
-        payload: Dict[str, Any] = {"read_chat": chat}
+        payload: Dict[str, Any] = {}
         if read_limit is not None:
             payload["read_limit"] = read_limit
         if listen_seconds is not None:
             payload["listen_seconds"] = listen_seconds
-        if show_qr:
-            payload["show_qr"] = True
-        if force_relink:
-            payload["force_relink"] = True
-        return self.run(db_uri, account_phone, payload)
+        return self.run(db_uri, phone, payload if payload else None)
 

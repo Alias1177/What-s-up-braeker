@@ -54,21 +54,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="How long to listen for messages before returning.",
     )
-    parser.add_argument(
-        "--read-chat",
-        default=None,
-        help="Phone or JID of the chat to read messages from (defaults to recipient).",
-    )
-    parser.add_argument(
-        "--show-qr",
-        action="store_true",
-        help="Print QR codes in the console when login is required.",
-    )
-    parser.add_argument(
-        "--force-relink",
-        action="store_true",
-        help="Clear the stored session and request a brand-new QR link.",
-    )
     args = parser.parse_args(argv)
 
     lib_path = Path(args.lib)
@@ -80,31 +65,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         bridge = WhatsAppBridge(lib_path)
-        payload: dict[str, object] = {}
-
+        payload = {}
         if not args.read_only:
-            if not args.recipient:
-                parser.error("--recipient is required when sending a message")
             payload["send_text"] = args.message
-            payload["recipient"] = args.recipient
-        elif args.recipient:
-            payload["recipient"] = args.recipient
-
-        if args.read_chat:
-            payload["read_chat"] = args.read_chat
-        elif args.recipient:
-            payload.setdefault("read_chat", args.recipient)
-
         if args.read_limit is not None:
             payload["read_limit"] = args.read_limit
         if args.listen_seconds is not None:
             payload["listen_seconds"] = args.listen_seconds
-        if args.show_qr:
-            payload["show_qr"] = True
-        if args.force_relink:
-            payload["force_relink"] = True
 
-        result = bridge.run(args.db_uri, args.account_phone, payload or None)
+        result = bridge.run(args.db_uri, args.phone, payload or None)
     except BridgeError as exc:  # pragma: no cover - defensive
         print(f"Bridge error: {exc}", file=sys.stderr)
         return 1
