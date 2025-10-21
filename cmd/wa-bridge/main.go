@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -29,8 +30,147 @@ type Response struct {
 	LastMessages []string `json:"last_messages,omitempty"`
 }
 
-var lastReceivedMessages []string
-var lastReceivedMessagesMu sync.Mutex
+const (
+	defaultReadLimit     = 10
+	defaultListenSeconds = 10.0
+	defaultMessageBuffer = 50
+	maxMessageBuffer     = 1000
+)
+
+type runPayload struct {
+	SendText      string  `json:"send_text,omitempty"`
+	ReadLimit     int     `json:"read_limit,omitempty"`
+	ListenSeconds float64 `json:"listen_seconds,omitempty"`
+}
+
+type normalizedConfig struct {
+	SendText          string
+	ShouldSend        bool
+	ShouldListen      bool
+	ReadLimit         int
+	ListenDuration    time.Duration
+	explicitReadLimit bool
+}
+
+type messageCollector struct {
+	mu        sync.Mutex
+	messages  []string
+	bufferCap int
+	limit     int
+	done      chan struct{}
+}
+
+func newMessageCollector(limit, bufferCap int) *messageCollector {
+	if bufferCap <= 0 {
+		bufferCap = 1
+	}
+	var done chan struct{}
+	if limit > 0 {
+		done = make(chan struct{}, 1)
+	}
+	return &messageCollector{
+		bufferCap: bufferCap,
+		limit:     limit,
+		done:      done,
+	}
+}
+
+func (mc *messageCollector) add(msg string) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	mc.messages = append(mc.messages, msg)
+	if len(mc.messages) > mc.bufferCap {
+		mc.messages = mc.messages[len(mc.messages)-mc.bufferCap:]
+	}
+
+	if mc.limit > 0 && len(mc.messages) >= mc.limit && mc.done != nil {
+		select {
+		case mc.done <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (mc *messageCollector) snapshot() []string {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	result := make([]string, len(mc.messages))
+	copy(result, mc.messages)
+	return result
+}
+
+func parseRunPayload(raw string) (runPayload, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return runPayload{}, false, nil
+	}
+
+	if strings.HasPrefix(trimmed, "{") {
+		var payload runPayload
+		if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+			return runPayload{}, true, err
+		}
+		return payload, true, nil
+	}
+
+	return runPayload{SendText: raw}, false, nil
+}
+
+func normalizeConfig(raw string) (normalizedConfig, error) {
+	payload, payloadProvided, err := parseRunPayload(raw)
+	if err != nil {
+		return normalizedConfig{}, fmt.Errorf("invalid request payload: %w", err)
+	}
+
+	sendText := strings.TrimSpace(payload.SendText)
+	shouldSend := sendText != ""
+
+	readLimit := payload.ReadLimit
+	explicitReadLimit := readLimit != 0
+	if readLimit < 0 {
+		readLimit = 0
+	}
+
+	listenSeconds := payload.ListenSeconds
+	if listenSeconds < 0 {
+		listenSeconds = 0
+	}
+
+	listenDuration := time.Duration(listenSeconds * float64(time.Second))
+
+	shouldListen := readLimit != 0 || listenDuration > 0 || !shouldSend
+	if shouldListen && listenDuration <= 0 {
+		listenDuration = time.Duration(defaultListenSeconds * float64(time.Second))
+	}
+
+	if shouldListen && readLimit == 0 && !explicitReadLimit {
+		if listenSeconds == 0 && (payloadProvided || !shouldSend) {
+			readLimit = defaultReadLimit
+		}
+	}
+
+	return normalizedConfig{
+		SendText:          sendText,
+		ShouldSend:        shouldSend,
+		ShouldListen:      shouldListen,
+		ReadLimit:         readLimit,
+		ListenDuration:    listenDuration,
+		explicitReadLimit: explicitReadLimit,
+	}, nil
+}
+
+func determineBufferCap(limit int) int {
+	bufferCap := defaultMessageBuffer
+	if limit > bufferCap {
+		bufferCap = limit
+	}
+	if bufferCap > maxMessageBuffer {
+		bufferCap = maxMessageBuffer
+	}
+	return bufferCap
+}
 
 //export WaRun
 func WaRun(dbURI, phone, message *C.char) *C.char {
@@ -48,9 +188,18 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 	resp := &Response{Status: "ok"}
 	ctx := context.Background()
 
-	lastReceivedMessagesMu.Lock()
-	lastReceivedMessages = lastReceivedMessages[:0]
-	lastReceivedMessagesMu.Unlock()
+	cfg, err := normalizeConfig(goMessage)
+	if err != nil {
+		resp.Status = "error"
+		resp.Error = err.Error()
+		return marshalResponse(resp)
+	}
+
+	if !cfg.ShouldSend && !cfg.ShouldListen {
+		resp.Status = "error"
+		resp.Error = "nothing to do: provide send_text or listening options"
+		return marshalResponse(resp)
+	}
 
 	// Инициализация клиента
 	log := waLog.Stdout("Client", "INFO", true)
@@ -71,11 +220,17 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 
 	client := whatsmeow.NewClient(deviceStore, log)
 
-	// Обработчик входящих сообщений
-	client.AddEventHandler(func(evt interface{}) {
+	targetJID := types.NewJID(goPhone, types.DefaultUserServer)
+
+	collector := newMessageCollector(cfg.ReadLimit, determineBufferCap(cfg.ReadLimit))
+
+	handlerID := client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
 			if v.Message == nil {
+				return
+			}
+			if v.Info.Chat == nil || !v.Info.Chat.Equal(targetJID) {
 				return
 			}
 			text := v.Message.GetConversation()
@@ -88,13 +243,12 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 					sender = "Ты"
 				}
 				msg := fmt.Sprintf("[%s] %s", sender, text)
-				lastReceivedMessagesMu.Lock()
-				lastReceivedMessages = append(lastReceivedMessages, msg)
-				lastReceivedMessagesMu.Unlock()
 				fmt.Println("📥 Новое сообщение:", msg)
+				collector.add(msg)
 			}
 		}
 	})
+	defer client.RemoveEventHandler(handlerID)
 
 	// Подключаемся
 	err = client.Connect()
@@ -109,69 +263,71 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 	fmt.Println("Жду стабилизации соединения...")
 	time.Sleep(3 * time.Second)
 
-	recipientJID := types.NewJID(goPhone, types.DefaultUserServer)
+	if cfg.ShouldSend {
+		fmt.Printf("📤 Отправляю сообщение...\n")
+		fmt.Printf("   Текст для отправки: '%s'\n", cfg.SendText)
+		fmt.Printf("   Получателю: %s\n", goPhone)
 
-	// Если сообщение пустое - это режим чтения
-	if goMessage == "" || len(goMessage) == 0 {
-		fmt.Println("📖 Режим чтения (пустое сообщение)")
-
-		fmt.Println("👂 Слушаю входящие сообщения 10 секунд...")
-		time.Sleep(10 * time.Second)
-
-		lastReceivedMessagesMu.Lock()
-		if len(lastReceivedMessages) == 0 {
-			fmt.Println("⚠️ Пока нет полученных сообщений в этой сессии")
+		msgToSend := &waProto.Message{
+			Conversation: proto.String(cfg.SendText),
 		}
 
-		resp.LastMessages = append([]string(nil), lastReceivedMessages...)
-		lastReceivedMessagesMu.Unlock()
-		return marshalResponse(resp)
+		if msgToSend.Conversation == nil || *msgToSend.Conversation == "" {
+			resp.Status = "error"
+			resp.Error = "message is empty after conversion"
+			fmt.Println("❌ ОШИБКА: Conversation = nil или пустая!")
+			return marshalResponse(resp)
+		}
+
+		fmt.Printf("✅ Proto сообщение создано: '%s'\n", *msgToSend.Conversation)
+
+		sendResp, err := client.SendMessage(context.Background(), targetJID, msgToSend)
+		if err != nil {
+			resp.Status = "error"
+			resp.Error = fmt.Sprintf("failed to send: %v", err)
+			return marshalResponse(resp)
+		}
+
+		fmt.Printf("✅ Сообщение отправлено! ID: %s\n", sendResp.ID)
+		resp.MessageID = sendResp.ID
 	}
 
-	// Режим отправки
-	fmt.Printf("📤 Отправляю сообщение...\n")
-	fmt.Printf("   Текст для отправки: '%s'\n", goMessage)
-	fmt.Printf("   Получателю: %s\n", goPhone)
+	if cfg.ShouldListen {
+		listenMsg := fmt.Sprintf("👂 Слушаю входящие сообщения")
+		if cfg.ReadLimit > 0 {
+			listenMsg += fmt.Sprintf(" (до %d сообщений)", cfg.ReadLimit)
+		}
+		if cfg.ListenDuration > 0 {
+			listenMsg += fmt.Sprintf(" в течение %.1f сек.", cfg.ListenDuration.Seconds())
+		}
+		fmt.Println(listenMsg + "...")
 
-	// КРИТИЧНО: Создаём сообщение с явной проверкой
-	if goMessage == "" {
-		resp.Status = "error"
-		resp.Error = "message is empty after conversion"
-		return marshalResponse(resp)
+		var timeout <-chan time.Time
+		if cfg.ListenDuration > 0 {
+			timer := time.NewTimer(cfg.ListenDuration)
+			defer timer.Stop()
+			timeout = timer.C
+		}
+
+		if cfg.ReadLimit > 0 && collector.done != nil {
+			if timeout != nil {
+				select {
+				case <-collector.done:
+				case <-timeout:
+				}
+			} else {
+				<-collector.done
+			}
+		} else if timeout != nil {
+			<-timeout
+		}
+
+		messages := collector.snapshot()
+		if len(messages) == 0 {
+			fmt.Println("⚠️ Пока нет полученных сообщений в этой сессии")
+		}
+		resp.LastMessages = messages
 	}
-
-	msgToSend := &waProto.Message{
-		Conversation: proto.String(goMessage),
-	}
-
-	// Проверяем что создали
-	if msgToSend.Conversation == nil || *msgToSend.Conversation == "" {
-		resp.Status = "error"
-		resp.Error = "failed to create message proto"
-		fmt.Println("❌ ОШИБКА: Conversation = nil или пустая!")
-		return marshalResponse(resp)
-	}
-
-	fmt.Printf("✅ Proto сообщение создано: '%s'\n", *msgToSend.Conversation)
-
-	sendResp, err := client.SendMessage(context.Background(), recipientJID, msgToSend)
-	if err != nil {
-		resp.Status = "error"
-		resp.Error = fmt.Sprintf("failed to send: %v", err)
-		return marshalResponse(resp)
-	}
-
-	fmt.Printf("✅ Сообщение отправлено! ID: %s\n", sendResp.ID)
-	resp.MessageID = sendResp.ID
-
-	// Слушаем новые сообщения
-	fmt.Println("👂 Слушаю новые сообщения 10 секунд...")
-	time.Sleep(10 * time.Second)
-
-	lastReceivedMessagesMu.Lock()
-	messagesCopy := append([]string(nil), lastReceivedMessages...)
-	lastReceivedMessagesMu.Unlock()
-	resp.LastMessages = messagesCopy
 
 	fmt.Println("Отключаюсь...")
 	return marshalResponse(resp)
