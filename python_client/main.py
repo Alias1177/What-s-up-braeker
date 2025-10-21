@@ -11,7 +11,7 @@ from pathlib import Path
 from python import BridgeError, WhatsAppBridge
 
 
-def parse_args(argv: list[str] | None = None) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Send a WhatsApp message via the Go bridge library.",
     )
@@ -38,6 +38,23 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.ArgumentParser, 
         "--message",
         default="Hello from the standalone Python client!",
         help="Text message to send (ignored with --read-only).",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Skip sending a message and only collect incoming messages.",
+    )
+    parser.add_argument(
+        "--read-limit",
+        type=int,
+        default=None,
+        help="Maximum number of messages to collect (default is library-controlled).",
+    )
+    parser.add_argument(
+        "--listen-seconds",
+        type=float,
+        default=None,
+        help="How long to listen for messages (fractional seconds allowed).",
     )
     parser.add_argument(
         "--read-only",
@@ -84,32 +101,16 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         bridge = WhatsAppBridge(lib_path)
-        payload: dict[str, object] = {}
-
+        payload = {}
         if not args.read_only:
-            if not args.recipient:
-                parser.error("--recipient is required when sending a message")
             payload["send_text"] = args.message
-            payload["recipient"] = args.recipient
-        elif args.recipient:
-            payload["recipient"] = args.recipient
-
-        if args.read_chat:
-            payload["read_chat"] = args.read_chat
-        elif args.recipient:
-            payload.setdefault("read_chat", args.recipient)
-
         if args.read_limit is not None:
             payload["read_limit"] = args.read_limit
         if args.listen_seconds is not None:
             payload["listen_seconds"] = args.listen_seconds
-        if args.show_qr:
-            payload["show_qr"] = True
-        if args.force_relink:
-            payload["force_relink"] = True
 
         request_payload = payload or None
-        result = bridge.run(args.db_uri, args.account_phone, request_payload)
+        result = bridge.run(args.db_uri, args.phone, request_payload)
     except BridgeError as exc:  # pragma: no cover
         print(f"Bridge error: {exc}", file=sys.stderr)
         return 1
