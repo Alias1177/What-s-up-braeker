@@ -25,6 +25,7 @@ type Config struct {
 	Message           string
 	WaitBeforeSend    time.Duration
 	ListenAfterSend   time.Duration
+	ReadLimit         int
 	Output            io.Writer
 	QRWriter          io.Writer
 	LogLevel          string
@@ -41,6 +42,10 @@ type Result struct {
 
 // Run spins up the WhatsApp client, optionally shows QR code, sends a message and collects session messages.
 func Run(ctx context.Context, cfg Config) (*Result, error) {
+	if cfg.PhoneNumber == "" {
+		return nil, fmt.Errorf("phone number is required")
+	}
+
 	if cfg.DatabaseURI == "" {
 		cfg.DatabaseURI = "file:whatsapp.db?_foreign_keys=on"
 	}
@@ -65,10 +70,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		listenAfterSend = 10 * time.Second
 	}
 
+	readLimit := cfg.ReadLimit
+	if readLimit < 0 {
+		readLimit = 0
+	}
+
 	logLevel := cfg.LogLevel
 	if logLevel == "" {
 		logLevel = "INFO"
 	}
+
+	targetJID := types.NewJID(cfg.PhoneNumber, types.DefaultUserServer)
+	targetJIDString := targetJID.String()
 
 	log := waLog.Stdout("Client", logLevel, cfg.LogEnableColor)
 
@@ -97,6 +110,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
+			if v.Info.Chat == nil || v.Info.Chat.String() != targetJIDString {
+				return
+			}
 			sender := "Собеседник"
 			if v.Info.IsFromMe {
 				sender = "Ты"
@@ -116,6 +132,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				)
 				messagesMu.Lock()
 				lastMessages = append(lastMessages, msg)
+				if readLimit > 0 && len(lastMessages) > readLimit {
+					lastMessages = lastMessages[len(lastMessages)-readLimit:]
+				}
 				messagesMu.Unlock()
 				println("📩 Новое сообщение: %s", msg)
 			}
@@ -158,12 +177,6 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	println("Жду стабилизации соединения...")
 	time.Sleep(waitBeforeSend)
 
-	if cfg.PhoneNumber == "" {
-		return result, fmt.Errorf("phone number is required")
-	}
-
-	recipientJID := types.NewJID(cfg.PhoneNumber, types.DefaultUserServer)
-
 	println("\n📥 Последние сообщения за текущий запуск...")
 	messagesMu.Lock()
 	if len(lastMessages) > 0 {
@@ -177,15 +190,19 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	messagesMu.Unlock()
 
-	println("📤 Отправляю сообщение...")
-	resp, err := client.SendMessage(context.Background(), recipientJID, &waProto.Message{
-		Conversation: proto.String(cfg.Message),
-	})
-	if err != nil {
-		return result, fmt.Errorf("send message: %w", err)
+	if cfg.Message != "" {
+		println("📤 Отправляю сообщение...")
+		resp, err := client.SendMessage(context.Background(), targetJID, &waProto.Message{
+			Conversation: proto.String(cfg.Message),
+		})
+		if err != nil {
+			return result, fmt.Errorf("send message: %w", err)
+		}
+		result.MessageID = resp.ID
+		println("✅ Сообщение отправлено! ID: %s", resp.ID)
+	} else {
+		println("📤 Текст сообщения не задан, отправка пропущена")
 	}
-	result.MessageID = resp.ID
-	println("✅ Сообщение отправлено! ID: %s", resp.ID)
 
 	println("\n👂 Слушаю новые сообщения %d секунд...", int(listenAfterSend.Seconds()))
 	time.Sleep(listenAfterSend)
