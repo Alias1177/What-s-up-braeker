@@ -1,46 +1,14 @@
 #!/usr/bin/env python3
-"""
-Standalone Python script that calls the WhatsApp bridge shared library.
-"""
+"""Standalone Python script that calls the WhatsApp bridge shared library."""
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import sys
 from pathlib import Path
 
-
-class WaBridge:
-    """Thin wrapper around the `libwa.so` exported functions."""
-
-    def __init__(self, lib_path: Path) -> None:
-        if not lib_path.exists():
-            raise FileNotFoundError(f"shared library not found: {lib_path}")
-
-        self._lib = ctypes.CDLL(str(lib_path))
-        self._lib.WaRun.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
-        self._lib.WaRun.restype = ctypes.c_char_p
-        self._lib.WaFree.argtypes = [ctypes.c_char_p]
-        self._lib.WaFree.restype = None
-
-    def run(self, db_uri: str, phone: str, message: str) -> dict:
-        """Invoke the Go bridge and return decoded JSON data."""
-        ptr = self._lib.WaRun(
-            db_uri.encode("utf-8"),
-            phone.encode("utf-8"),
-            message.encode("utf-8"),
-        )
-        if not ptr:
-            raise RuntimeError("library returned NULL pointer")
-
-        try:
-            raw = ctypes.string_at(ptr).decode("utf-8")
-        finally:
-            self._lib.WaFree(ptr)
-
-        return json.loads(raw)
+from python import BridgeError, WhatsAppBridge
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -65,7 +33,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--message",
         default="Hello from the standalone Python client!",
-        help="Text message to send.",
+        help="Text message to send (ignored with --read-only).",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Skip sending a message and only collect incoming messages.",
+    )
+    parser.add_argument(
+        "--read-limit",
+        type=int,
+        default=None,
+        help="Maximum number of messages to collect (default is library-controlled).",
+    )
+    parser.add_argument(
+        "--listen-seconds",
+        type=float,
+        default=None,
+        help="How long to listen for messages (fractional seconds allowed).",
     )
     return parser.parse_args(argv)
 
@@ -78,8 +63,20 @@ def main(argv: list[str] | None = None) -> int:
         lib_path = (Path(__file__).resolve().parent / lib_path).resolve()
 
     try:
-        bridge = WaBridge(lib_path)
-        result = bridge.run(args.db_uri, args.phone, args.message)
+        bridge = WhatsAppBridge(lib_path)
+        payload = {}
+        if not args.read_only:
+            payload["send_text"] = args.message
+        if args.read_limit is not None:
+            payload["read_limit"] = args.read_limit
+        if args.listen_seconds is not None:
+            payload["listen_seconds"] = args.listen_seconds
+
+        request_payload = payload or None
+        result = bridge.run(args.db_uri, args.phone, request_payload)
+    except BridgeError as exc:  # pragma: no cover
+        print(f"Bridge error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # pragma: no cover
         print(f"Error: {exc}", file=sys.stderr)
         return 1
