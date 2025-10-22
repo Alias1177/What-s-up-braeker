@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -38,6 +39,133 @@ type Result struct {
 	LastMessages []string
 	MessageID    string
 	RequiresQR   bool
+}
+
+type messageRecord struct {
+	Timestamp time.Time
+	Formatted string
+}
+
+func extractPlainText(msg *waProto.Message) string {
+	if msg == nil {
+		return ""
+	}
+
+	if text := msg.GetConversation(); text != "" {
+		return text
+	}
+
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		if text := ext.GetText(); text != "" {
+			return text
+		}
+	}
+
+	if btn := msg.GetButtonsMessage(); btn != nil {
+		if text := btn.GetContentText(); text != "" {
+			return text
+		}
+	}
+
+	if resp := msg.GetButtonsResponseMessage(); resp != nil {
+		if text := resp.GetSelectedDisplayText(); text != "" {
+			return text
+		}
+		if id := resp.GetSelectedButtonID(); id != "" {
+			return id
+		}
+	}
+
+	if resp := msg.GetTemplateButtonReplyMessage(); resp != nil {
+		if text := resp.GetSelectedDisplayText(); text != "" {
+			return text
+		}
+		if id := resp.GetSelectedID(); id != "" {
+			return id
+		}
+	}
+
+	if resp := msg.GetListResponseMessage(); resp != nil {
+		if title := resp.GetTitle(); title != "" {
+			return title
+		}
+		if desc := resp.GetDescription(); desc != "" {
+			return desc
+		}
+	}
+
+	if poll := msg.GetPollCreationMessage(); poll != nil {
+		if name := poll.GetName(); name != "" {
+			return name
+		}
+	}
+
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		if caption := doc.GetCaption(); caption != "" {
+			return caption
+		}
+		if title := doc.GetTitle(); title != "" {
+			return title
+		}
+	}
+
+	if img := msg.GetImageMessage(); img != nil {
+		if caption := img.GetCaption(); caption != "" {
+			return caption
+		}
+	}
+
+	if video := msg.GetVideoMessage(); video != nil {
+		if caption := video.GetCaption(); caption != "" {
+			return caption
+		}
+	}
+
+	if contact := msg.GetContactMessage(); contact != nil {
+		if name := contact.GetDisplayName(); name != "" {
+			return name
+		}
+	}
+
+	if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		list := contacts.GetContacts()
+		for _, c := range list {
+			if name := c.GetDisplayName(); name != "" {
+				return name
+			}
+		}
+	}
+
+	if location := msg.GetLocationMessage(); location != nil {
+		if name := location.GetName(); name != "" {
+			return name
+		}
+		if address := location.GetAddress(); address != "" {
+			return address
+		}
+	}
+
+	if live := msg.GetLiveLocationMessage(); live != nil {
+		if caption := live.GetCaption(); caption != "" {
+			return caption
+		}
+	}
+
+	if reaction := msg.GetReactionMessage(); reaction != nil {
+		if text := reaction.GetText(); text != "" {
+			return text
+		}
+	}
+
+	if protocol := msg.GetProtocolMessage(); protocol != nil {
+		if key := protocol.GetKey(); key != nil {
+			if id := key.GetID(); id != "" {
+				return id
+			}
+		}
+	}
+
+	return ""
 }
 
 // Run spins up the WhatsApp client, optionally shows QR code, sends a message and collects session messages.
@@ -99,48 +227,107 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	var (
 		messagesMu   sync.Mutex
-		lastMessages []string
+		messageLog   []messageRecord
+		seenMessages = make(map[string]struct{})
+		outputMu     sync.Mutex
 	)
 	println := func(format string, args ...interface{}) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		fmt.Fprintf(out, format+"\n", args...)
+	}
+
+	appendMessage := func(evt *events.Message) (string, bool) {
+		if evt == nil || evt.Message == nil {
+			return "", false
+		}
+		if evt.Info.Chat.String() != targetJIDString {
+			return "", false
+		}
+
+		text := extractPlainText(evt.Message)
+		if text == "" {
+			return "", false
+		}
+
+		sender := "Собеседник"
+		if evt.Info.IsFromMe {
+			sender = "Ты"
+		}
+
+		formatted := fmt.Sprintf("[%s] %s: %s",
+			evt.Info.Timestamp.Format("02.01.2006 15:04"),
+			sender,
+			text,
+		)
+
 		messagesMu.Lock()
 		defer messagesMu.Unlock()
-		fmt.Fprintf(out, format+"\n", args...)
+
+		msgID := string(evt.Info.ID)
+		if msgID != "" {
+			if _, exists := seenMessages[msgID]; exists {
+				return "", false
+			}
+			seenMessages[msgID] = struct{}{}
+		}
+
+		messageLog = append(messageLog, messageRecord{
+			Timestamp: evt.Info.Timestamp,
+			Formatted: formatted,
+		})
+		sort.SliceStable(messageLog, func(i, j int) bool {
+			return messageLog[i].Timestamp.Before(messageLog[j].Timestamp)
+		})
+		if readLimit > 0 && len(messageLog) > readLimit {
+			messageLog = messageLog[len(messageLog)-readLimit:]
+		}
+
+		return formatted, true
 	}
 
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			if v.Info.Chat == nil || v.Info.Chat.String() != targetJIDString {
-				return
-			}
-			sender := "Собеседник"
-			if v.Info.IsFromMe {
-				sender = "Ты"
-			}
-
-			text := v.Message.GetConversation()
-			if text == "" && v.Message.ExtendedTextMessage != nil {
-				text = v.Message.ExtendedTextMessage.GetText()
-			}
-
-			if text != "" {
-				timestamp := v.Info.Timestamp
-				msg := fmt.Sprintf("[%s] %s: %s",
-					timestamp.Format("02.01.2006 15:04"),
-					sender,
-					text,
-				)
-				messagesMu.Lock()
-				lastMessages = append(lastMessages, msg)
-				if readLimit > 0 && len(lastMessages) > readLimit {
-					lastMessages = lastMessages[len(lastMessages)-readLimit:]
-				}
-				messagesMu.Unlock()
+			if msg, ok := appendMessage(v); ok {
 				println("📩 Новое сообщение: %s", msg)
 			}
 
 		case *events.HistorySync:
 			println("📚 Получена история чатов")
+			if v.Data == nil {
+				return
+			}
+
+			for _, conversation := range v.Data.GetConversations() {
+				convID := conversation.GetID()
+				if convID == "" {
+					convID = conversation.GetNewJID()
+				}
+				if convID != targetJIDString {
+					continue
+				}
+
+				historyEvents := make([]*events.Message, 0, len(conversation.GetMessages()))
+				for _, historyMsg := range conversation.GetMessages() {
+					parsed, err := client.ParseWebMessage(targetJID, historyMsg.GetMessage())
+					if err != nil {
+						println("⚠️ Не удалось разобрать сообщение истории: %v", err)
+						continue
+					}
+					historyEvents = append(historyEvents, parsed)
+				}
+
+				sort.SliceStable(historyEvents, func(i, j int) bool {
+					return historyEvents[i].Info.Timestamp.Before(historyEvents[j].Info.Timestamp)
+				})
+
+				for _, evtMsg := range historyEvents {
+					if msg, ok := appendMessage(evtMsg); ok {
+						println("📜 История: %s", msg)
+					}
+				}
+			}
 		}
 	})
 
@@ -179,16 +366,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	println("\n📥 Последние сообщения за текущий запуск...")
 	messagesMu.Lock()
-	if len(lastMessages) > 0 {
+	snapshot := append([]messageRecord(nil), messageLog...)
+	messagesMu.Unlock()
+
+	if len(snapshot) > 0 {
 		fmt.Fprintln(out, "\n--- Последние сообщения ---")
-		for i, msg := range lastMessages {
-			fmt.Fprintf(out, "\n%d) %s\n", i+1, msg)
+		for i, msg := range snapshot {
+			fmt.Fprintf(out, "\n%d) %s\n", i+1, msg.Formatted)
 		}
 		fmt.Fprintln(out, "---------------------------\n")
 	} else {
 		fmt.Fprintln(out, "⚠️ Пока нет полученных сообщений в этой сессии")
 	}
-	messagesMu.Unlock()
 
 	if cfg.Message != "" {
 		println("📤 Отправляю сообщение...")
@@ -208,7 +397,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	time.Sleep(listenAfterSend)
 
 	messagesMu.Lock()
-	result.LastMessages = append(result.LastMessages, lastMessages...)
+	for _, entry := range messageLog {
+		result.LastMessages = append(result.LastMessages, entry.Formatted)
+	}
 	messagesMu.Unlock()
 
 	println("\nОтключаюсь...")

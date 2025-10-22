@@ -21,6 +21,8 @@ __all__ = [
     "run",
 ]
 
+__version__ = "0.3.0"
+
 _LIB_EXTENSIONS = {
     "Darwin": ".dylib",
     "Linux": ".so",
