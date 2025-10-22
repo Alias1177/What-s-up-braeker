@@ -289,8 +289,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			if msg, ok := appendMessage(v); ok {
-				println("📩 Новое сообщение: %s", msg)
+			if v.Info.Chat.String() != targetJIDString {
+				return
+			}
+			sender := "Собеседник"
+			if v.Info.IsFromMe {
+				sender = "Ты"
 			}
 
 		case *events.HistorySync:
