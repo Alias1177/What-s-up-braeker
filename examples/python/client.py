@@ -73,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.listen_seconds is not None:
             payload["listen_seconds"] = args.listen_seconds
 
-        result = bridge.run(args.db_uri, args.phone, payload or None)
+        target = args.recipient or args.account_phone
+        result = bridge.run(args.db_uri, target, payload or None)
     except BridgeError as exc:  # pragma: no cover - defensive
         print(f"Bridge error: {exc}", file=sys.stderr)
         return 1
