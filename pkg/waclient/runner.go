@@ -110,7 +110,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			if v.Info.Chat == nil || v.Info.Chat.String() != targetJIDString {
+			if v.Info.Chat.String() != targetJIDString {
 				return
 			}
 			sender := "Собеседник"

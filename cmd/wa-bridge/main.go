@@ -4,25 +4,18 @@ package main
 #include <stdlib.h>
 */
 import "C"
+
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
-	"unicode"
 	"unsafe"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mdp/qrterminal/v3"
-	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
-	"go.mau.fi/whatsmeow/store/sqlstore"
-	"go.mau.fi/whatsmeow/types"
-	"go.mau.fi/whatsmeow/types/events"
-	waLog "go.mau.fi/whatsmeow/util/log"
-	"google.golang.org/protobuf/proto"
+
+	"github.com/Alias1177/What-s-up-braeker/pkg/waclient"
 )
 
 type Response struct {
@@ -36,8 +29,6 @@ type Response struct {
 const (
 	defaultReadLimit     = 10
 	defaultListenSeconds = 10.0
-	defaultMessageBuffer = 50
-	maxMessageBuffer     = 1000
 )
 
 type runPayload struct {
@@ -47,61 +38,11 @@ type runPayload struct {
 }
 
 type normalizedConfig struct {
-	SendText          string
-	ShouldSend        bool
-	ShouldListen      bool
-	ReadLimit         int
-	ListenDuration    time.Duration
-	explicitReadLimit bool
-}
-
-type messageCollector struct {
-	mu        sync.Mutex
-	messages  []string
-	bufferCap int
-	limit     int
-	done      chan struct{}
-}
-
-func newMessageCollector(limit, bufferCap int) *messageCollector {
-	if bufferCap <= 0 {
-		bufferCap = 1
-	}
-	var done chan struct{}
-	if limit > 0 {
-		done = make(chan struct{}, 1)
-	}
-	return &messageCollector{
-		bufferCap: bufferCap,
-		limit:     limit,
-		done:      done,
-	}
-}
-
-func (mc *messageCollector) add(msg string) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-
-	mc.messages = append(mc.messages, msg)
-	if len(mc.messages) > mc.bufferCap {
-		mc.messages = mc.messages[len(mc.messages)-mc.bufferCap:]
-	}
-
-	if mc.limit > 0 && len(mc.messages) >= mc.limit && mc.done != nil {
-		select {
-		case mc.done <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func (mc *messageCollector) snapshot() []string {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-
-	result := make([]string, len(mc.messages))
-	copy(result, mc.messages)
-	return result
+	SendText       string
+	ShouldSend     bool
+	ShouldListen   bool
+	ReadLimit      int
+	ListenDuration time.Duration
 }
 
 func parseRunPayload(raw string) (runPayload, bool, error) {
@@ -144,52 +85,41 @@ func normalizeConfig(raw string) (normalizedConfig, error) {
 	listenDuration := time.Duration(listenSeconds * float64(time.Second))
 
 	shouldListen := readLimit != 0 || listenDuration > 0 || !shouldSend
-	if shouldListen && listenDuration <= 0 {
-		listenDuration = time.Duration(defaultListenSeconds * float64(time.Second))
-	}
-
-	if shouldListen && readLimit == 0 && !explicitReadLimit {
-		if listenSeconds == 0 && (payloadProvided || !shouldSend) {
-			readLimit = defaultReadLimit
+	if shouldListen {
+		if listenDuration <= 0 {
+			listenDuration = time.Duration(defaultListenSeconds * float64(time.Second))
 		}
+		if readLimit == 0 && !explicitReadLimit {
+			if listenSeconds == 0 && (payloadProvided || !shouldSend) {
+				readLimit = defaultReadLimit
+			}
+		}
+	} else {
+		readLimit = 0
+		listenDuration = 0
 	}
 
 	return normalizedConfig{
-		SendText:          sendText,
-		ShouldSend:        shouldSend,
-		ShouldListen:      shouldListen,
-		ReadLimit:         readLimit,
-		ListenDuration:    listenDuration,
-		explicitReadLimit: explicitReadLimit,
+		SendText:       sendText,
+		ShouldSend:     shouldSend,
+		ShouldListen:   shouldListen,
+		ReadLimit:      readLimit,
+		ListenDuration: listenDuration,
 	}, nil
-}
-
-func determineBufferCap(limit int) int {
-	bufferCap := defaultMessageBuffer
-	if limit > bufferCap {
-		bufferCap = limit
-	}
-	if bufferCap > maxMessageBuffer {
-		bufferCap = maxMessageBuffer
-	}
-	return bufferCap
 }
 
 //export WaRun
 func WaRun(dbURI, phone, message *C.char) *C.char {
-	// Конвертируем C-строки в Go-строки
-	goDBURI := C.GoString(dbURI)
-	goPhone := C.GoString(phone)
+	goDBURI := strings.TrimSpace(C.GoString(dbURI))
+	goPhone := strings.TrimSpace(C.GoString(phone))
 	goMessage := C.GoString(message)
 
-	// ВАЖНО: Логируем что получили
-	fmt.Printf("[DEBUG] Получено от Python:\n")
-	fmt.Printf("  DB: %s\n", goDBURI)
-	fmt.Printf("  Phone: %s\n", goPhone)
-	fmt.Printf("  Message: '%s' (длина: %d байт)\n", goMessage, len(goMessage))
-
 	resp := &Response{Status: "ok"}
-	ctx := context.Background()
+	if goPhone == "" {
+		resp.Status = "error"
+		resp.Error = "phone number is required"
+		return marshalResponse(resp)
+	}
 
 	cfg, err := normalizeConfig(goMessage)
 	if err != nil {
@@ -198,202 +128,36 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 		return marshalResponse(resp)
 	}
 
-	if !cfg.ShouldSend && !cfg.ShouldListen {
-		resp.Status = "error"
-		resp.Error = "nothing to do: provide send_text or listening options"
-		return marshalResponse(resp)
+	waConfig := waclient.Config{
+		DatabaseURI: goDBURI,
+		PhoneNumber: goPhone,
+		ReadLimit:   cfg.ReadLimit,
 	}
-
-	// Инициализация клиента
-	log := waLog.Stdout("Client", "INFO", true)
-	container, err := sqlstore.New(ctx, "sqlite3", goDBURI, log)
-	if err != nil {
-		resp.Status = "error"
-		resp.Error = fmt.Sprintf("failed to init db: %v", err)
-		return marshalResponse(resp)
-	}
-	defer container.Close()
-
-	deviceStore, err := container.GetFirstDevice(ctx)
-	if err != nil {
-		resp.Status = "error"
-		resp.Error = fmt.Sprintf("failed to get device: %v", err)
-		return marshalResponse(resp)
-	}
-
-	client := whatsmeow.NewClient(deviceStore, log)
-
-	targetJID := types.NewJID(goPhone, types.DefaultUserServer)
-
-	collector := newMessageCollector(cfg.ReadLimit, determineBufferCap(cfg.ReadLimit))
-
-	handlerID := client.AddEventHandler(func(evt interface{}) {
-		switch v := evt.(type) {
-		case *events.Message:
-			if collector == nil || v.Message == nil {
-				return
-			}
-			if v.Info.Chat == nil {
-				return
-			}
-			if haveReadTarget && !v.Info.Chat.Equal(readTarget) {
-				return
-			}
-			if v.Info.Chat == nil || !v.Info.Chat.Equal(targetJID) {
-				return
-			}
-			text := v.Message.GetConversation()
-			if text == "" && v.Message.ExtendedTextMessage != nil {
-				text = v.Message.ExtendedTextMessage.GetText()
-			}
-			if text != "" {
-				sender := "Собеседник"
-				if v.Info.IsFromMe {
-					sender = "Ты"
-				}
-				msg := fmt.Sprintf("[%s] %s", sender, text)
-				fmt.Println("📥 Новое сообщение:", msg)
-				collector.add(msg)
-			}
-		}
-	})
-	defer client.RemoveEventHandler(handlerID)
-
-	connected := false
-	defer func() {
-		if connected {
-			client.Disconnect()
-		}
-	}()
-
-	resp.RequiresQR = client.Store.ID == nil
-	if resp.RequiresQR {
-		fmt.Printf("ℹ️ Требуется авторизация через QR-код для %s\n", accountJIDString)
-	}
-	if client.Store.ID == nil {
-		qrChan, _ := client.GetQRChannel(context.Background())
-		if err = client.Connect(); err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("failed to connect (qr): %v", err)
-			return marshalResponse(resp)
-		}
-		connected = true
-		for evt := range qrChan {
-			switch evt.Event {
-			case "code":
-				if cfg.ShowQR {
-					fmt.Println("📱 Отсканируйте QR-код в WhatsApp:")
-					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				} else {
-					fmt.Println("ℹ️ Получен QR-код (show_qr=false, вывод пропущен)")
-				}
-			case "scan":
-				fmt.Println("📸 QR-код отсканирован, ожидаем подтверждения...")
-			case "timeout":
-				fmt.Println("⏳ Срок действия QR истёк, получаем новый...")
-			case "success":
-				fmt.Println("✅ Авторизация по QR завершена")
-			default:
-				fmt.Printf("ℹ️ Событие QR: %s\n", evt.Event)
-			}
-		}
-		fmt.Println("ℹ️ QR-канал закрыт, продолжаем работу")
-		fmt.Println("✅ Подключено к WhatsApp!")
-	} else {
-		if err = client.Connect(); err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("failed to connect: %v", err)
-			return marshalResponse(resp)
-		}
-		connected = true
-		fmt.Println("✅ Подключено к WhatsApp!")
-	}
-
-	if cfg.ShouldSend || cfg.ShouldListen {
-		fmt.Println("Жду стабилизации соединения...")
-		time.Sleep(3 * time.Second)
-	}
-
 	if cfg.ShouldSend {
-		fmt.Printf("📤 Отправляю сообщение...\n")
-		fmt.Printf("   Текст для отправки: '%s'\n", cfg.SendText)
-		fmt.Printf("   Получателю: %s\n", sendTarget.String())
-
-	if cfg.ShouldSend {
-		fmt.Printf("📤 Отправляю сообщение...\n")
-		fmt.Printf("   Текст для отправки: '%s'\n", cfg.SendText)
-		fmt.Printf("   Получателю: %s\n", goPhone)
-
-		msgToSend := &waProto.Message{
-			Conversation: proto.String(cfg.SendText),
-		}
-
-		if msgToSend.Conversation == nil || *msgToSend.Conversation == "" {
-			resp.Status = "error"
-			resp.Error = "message is empty after conversion"
-			fmt.Println("❌ ОШИБКА: Conversation = nil или пустая!")
-			return marshalResponse(resp)
-		}
-
-		fmt.Printf("✅ Proto сообщение создано: '%s'\n", *msgToSend.Conversation)
-
-		sendResp, err := client.SendMessage(context.Background(), targetJID, msgToSend)
-		if err != nil {
-			resp.Status = "error"
-			resp.Error = fmt.Sprintf("failed to send: %v", err)
-			return marshalResponse(resp)
-		}
-
-		fmt.Printf("✅ Сообщение отправлено! ID: %s\n", sendResp.ID)
-		resp.MessageID = sendResp.ID
+		waConfig.Message = cfg.SendText
 	}
-
 	if cfg.ShouldListen {
-		listenMsg := fmt.Sprintf("👂 Слушаю входящие сообщения")
-		if cfg.ReadLimit > 0 {
-			listenMsg += fmt.Sprintf(" (до %d сообщений)", cfg.ReadLimit)
-		}
-		if cfg.ListenDuration > 0 {
-			listenMsg += fmt.Sprintf(" в течение %.1f сек.", cfg.ListenDuration.Seconds())
-		}
-		fmt.Println(listenMsg + "...")
-
-		var timeout <-chan time.Time
-		if cfg.ListenDuration > 0 {
-			timer := time.NewTimer(cfg.ListenDuration)
-			defer timer.Stop()
-			timeout = timer.C
-		}
-
-		if cfg.ReadLimit > 0 && collector.done != nil {
-			if timeout != nil {
-				select {
-				case <-collector.done:
-				case <-timeout:
-				}
-			} else {
-				<-collector.done
-			}
-		} else if timeout != nil {
-			<-timeout
-		}
-
-		messages := collector.snapshot()
-		if len(messages) == 0 {
-			fmt.Println("⚠️ Пока нет полученных сообщений в этой сессии")
-		}
-		resp.LastMessages = messages
+		waConfig.ListenAfterSend = cfg.ListenDuration
+	} else {
+		waConfig.ListenAfterSend = time.Second
 	}
 
-	fmt.Println("Отключаюсь...")
+	result, runErr := waclient.Run(context.Background(), waConfig)
+	if runErr != nil {
+		resp.Status = "error"
+		resp.Error = runErr.Error()
+		return marshalResponse(resp)
+	}
+
+	resp.MessageID = result.MessageID
+	resp.LastMessages = append(resp.LastMessages, result.LastMessages...)
+	resp.RequiresQR = result.RequiresQR
 	return marshalResponse(resp)
 }
 
 func marshalResponse(resp *Response) *C.char {
 	data, _ := json.Marshal(resp)
-	result := C.CString(string(data))
-	fmt.Printf("📦 Ответ библиотеки: %s\n", string(data))
-	return result
+	return C.CString(string(data))
 }
 
 //export WaFree
