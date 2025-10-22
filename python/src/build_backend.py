@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from distutils.util import get_platform
+from packaging import tags
 from setuptools import Command
 from setuptools.command.build_py import build_py as build_py_orig
 from wheel.bdist_wheel import bdist_wheel as bdist_wheel_orig
@@ -97,5 +98,20 @@ class bdist_wheel(bdist_wheel_orig):
     def finalize_options(self) -> None:
         super().finalize_options()
         self.root_is_pure = False
-        if not self.plat_name:
-            self.plat_name = get_platform().replace("-", "_")
+        platform_tag = self.plat_name or get_platform().replace("-", "_")
+        platform_tag = platform_tag.replace("-", "_")
+        self.plat_name = _resolve_platform_tag(platform_tag)
+
+
+def _resolve_platform_tag(default_platform: str) -> str:
+    """Return a PyPI-compatible platform tag for the current system."""
+
+    if default_platform.startswith("linux"):
+        normalized_default = default_platform.replace("linux", "manylinux_2_17", 1)
+        for tag in tags.sys_tags():
+            platform_tag = tag.platform.replace("-", "_")
+            if platform_tag.startswith(("manylinux", "musllinux")):
+                return platform_tag
+        return normalized_default
+
+    return default_platform

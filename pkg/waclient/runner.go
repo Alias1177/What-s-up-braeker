@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,11 +43,6 @@ type Result struct {
 	LastMessages []string
 	MessageID    string
 	RequiresQR   bool
-}
-
-type messageRecord struct {
-	Timestamp time.Time
-	Formatted string
 }
 
 func extractPlainText(msg *waProto.Message) string {
@@ -306,9 +302,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			if targetJIDString != "" && v.Info.Chat.String() != targetJIDString {
 				return
 			}
-			sender := "Собеседник"
-			if v.Info.IsFromMe {
-				sender = "Ты"
+			if v.Info.IsFromMe && !includeFromMe {
+				return
+			}
+
+			if msg, ok := appendMessage(v); ok {
+				println("💬 %s", msg)
 			}
 
 		case *events.HistorySync:
@@ -341,6 +340,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				})
 
 				for _, evtMsg := range historyEvents {
+					if evtMsg.Info.IsFromMe && !includeFromMe {
+						continue
+					}
 					if msg, ok := appendMessage(evtMsg); ok {
 						println("📜 История: %s", msg)
 					}
@@ -458,251 +460,7 @@ func parseChatIdentifier(value string) (types.JID, error) {
 	return types.NewJID(value, types.DefaultUserServer), nil
 }
 
-func senderLabel(evt *events.Message) string {
-	if evt.Info.IsFromMe {
-		return "Ты"
-	}
-
-	if push := strings.TrimSpace(evt.Info.PushName); push != "" {
-		return push
-	}
-
-	if evt.Info.Sender.User != "" {
-		return evt.Info.Sender.User
-	}
-
-	return "Собеседник"
-}
-
 type messageRecord struct {
-	key       string
-	timestamp time.Time
-	content   string
-}
-
-func newMessageRecord(evt *events.Message) (messageRecord, bool) {
-	if evt == nil || evt.Message == nil {
-		return messageRecord{}, false
-	}
-
-	text := strings.TrimSpace(extractMessageText(evt.Message))
-	if text == "" {
-		return messageRecord{}, false
-	}
-
-	timestamp := evt.Info.Timestamp
-	if timestamp.IsZero() {
-		timestamp = time.Now()
-	}
-
-	sender := senderLabel(evt)
-	formatted := fmt.Sprintf("[%s] %s: %s",
-		timestamp.Format("02.01.2006 15:04"),
-		sender,
-		text,
-	)
-
-	key := evt.Info.ID
-	if key == "" {
-		key = fmt.Sprintf("%s|%s|%t|%s",
-			timestamp.UTC().Format(time.RFC3339Nano),
-			sender,
-			evt.Info.IsFromMe,
-			text,
-		)
-	}
-
-	return messageRecord{
-		key:       key,
-		timestamp: timestamp,
-		content:   formatted,
-	}, true
-}
-
-func extractMessageText(msg *waProto.Message) string {
-	if msg == nil {
-		return ""
-	}
-
-	if text := msg.GetConversation(); text != "" {
-		return text
-	}
-
-	if ext := msg.GetExtendedTextMessage(); ext != nil {
-		if text := ext.GetText(); text != "" {
-			return text
-		}
-	}
-
-	if img := msg.GetImageMessage(); img != nil {
-		if caption := img.GetCaption(); caption != "" {
-			return caption
-		}
-	}
-
-	if video := msg.GetVideoMessage(); video != nil {
-		if caption := video.GetCaption(); caption != "" {
-			return caption
-		}
-	}
-
-	if doc := msg.GetDocumentMessage(); doc != nil {
-		if caption := doc.GetCaption(); caption != "" {
-			return caption
-		}
-	}
-
-	if buttons := msg.GetButtonsMessage(); buttons != nil {
-		if text := buttons.GetContentText(); text != "" {
-			return text
-		}
-		if footer := buttons.GetFooterText(); footer != "" {
-			return footer
-		}
-	}
-
-	if resp := msg.GetButtonsResponseMessage(); resp != nil {
-		if text := resp.GetSelectedDisplayText(); text != "" {
-			return text
-		}
-		if id := resp.GetSelectedButtonID(); id != "" {
-			return id
-		}
-	}
-
-	if list := msg.GetListResponseMessage(); list != nil {
-		if text := list.GetTitle(); text != "" {
-			return text
-		}
-		if reply := list.GetSingleSelectReply(); reply != nil {
-			if selected := reply.GetSelectedRowID(); selected != "" {
-				return selected
-			}
-		}
-	}
-
-	if tmpl := msg.GetTemplateButtonReplyMessage(); tmpl != nil {
-		if text := tmpl.GetSelectedDisplayText(); text != "" {
-			return text
-		}
-		if id := tmpl.GetSelectedID(); id != "" {
-			return id
-		}
-	}
-
-	if tmplResp := msg.GetTemplateMessage(); tmplResp != nil {
-		if hydrated := tmplResp.GetHydratedTemplate(); hydrated != nil {
-			if text := hydrated.GetHydratedContentText(); text != "" {
-				return text
-			}
-			if title := hydrated.GetHydratedTitleText(); title != "" {
-				return title
-			}
-			if footer := hydrated.GetHydratedFooterText(); footer != "" {
-				return footer
-			}
-		}
-	}
-
-	return ""
-}
-
-func appendRecord(mu *sync.Mutex, records *[]messageRecord, seen map[string]struct{}, record messageRecord) bool {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if _, exists := seen[record.key]; exists {
-		return false
-	}
-
-	seen[record.key] = struct{}{}
-	*records = append(*records, record)
-	return true
-}
-
-func processHistorySyncMessages(client *whatsmeow.Client, history *events.HistorySync, targetJID string, includeFromMe bool, add func(messageRecord) bool, logf func(string, ...interface{})) int {
-	if history == nil || history.Data == nil {
-		return 0
-	}
-
-	conversations := history.Data.GetConversations()
-	added := 0
-
-	for _, conv := range conversations {
-		if conv == nil {
-			continue
-		}
-
-		chatID := conv.GetID()
-		if chatID == "" {
-			continue
-		}
-
-		chatJID, err := types.ParseJID(chatID)
-		if err != nil {
-			logf("⚠️ Не удалось разобрать JID истории: %v", err)
-			continue
-		}
-
-		if targetJID != "" && chatJID.String() != targetJID {
-			continue
-		}
-
-		for _, historyMsg := range conv.GetMessages() {
-			if historyMsg == nil || historyMsg.GetMessage() == nil {
-				continue
-			}
-
-			evt, err := client.ParseWebMessage(chatJID, historyMsg.GetMessage())
-			if err != nil {
-				logf("⚠️ Не удалось обработать сообщение истории: %v", err)
-				continue
-			}
-
-			if evt.Info.IsFromMe && !includeFromMe {
-				continue
-			}
-
-			if record, ok := newMessageRecord(evt); ok {
-				if add(record) {
-					added++
-				}
-			}
-		}
-	}
-
-	return added
-}
-
-func snapshotRecords(records []messageRecord, limit int) []messageRecord {
-	if len(records) == 0 {
-		return nil
-	}
-
-	snapshot := append([]messageRecord(nil), records...)
-	sort.SliceStable(snapshot, func(i, j int) bool {
-		if snapshot[i].timestamp.Equal(snapshot[j].timestamp) {
-			return snapshot[i].content < snapshot[j].content
-		}
-		return snapshot[i].timestamp.Before(snapshot[j].timestamp)
-	})
-
-	if limit > 0 && len(snapshot) > limit {
-		snapshot = snapshot[len(snapshot)-limit:]
-	}
-
-	return snapshot
-}
-
-func recordsToStrings(records []messageRecord) []string {
-	if len(records) == 0 {
-		return nil
-	}
-
-	out := make([]string, len(records))
-	for i, record := range records {
-		out[i] = record.content
-	}
-
-	return out
+	Timestamp time.Time
+	Formatted string
 }
