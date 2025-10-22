@@ -35,6 +35,8 @@ type runPayload struct {
 	SendText      string  `json:"send_text,omitempty"`
 	ReadLimit     int     `json:"read_limit,omitempty"`
 	ListenSeconds float64 `json:"listen_seconds,omitempty"`
+	FilterChat    string  `json:"filter_chat,omitempty"`
+	IncludeFromMe *bool   `json:"include_from_me,omitempty"`
 }
 
 type normalizedConfig struct {
@@ -43,6 +45,9 @@ type normalizedConfig struct {
 	ShouldListen   bool
 	ReadLimit      int
 	ListenDuration time.Duration
+	FilterChat     string
+	IncludeFromMe  bool
+	IncludeSet     bool
 }
 
 func parseRunPayload(raw string) (runPayload, bool, error) {
@@ -77,6 +82,15 @@ func normalizeConfig(raw string) (normalizedConfig, error) {
 		readLimit = 0
 	}
 
+	filterChat := strings.TrimSpace(payload.FilterChat)
+
+	includeFromMe := true
+	includeSet := false
+	if payload.IncludeFromMe != nil {
+		includeFromMe = *payload.IncludeFromMe
+		includeSet = true
+	}
+
 	listenSeconds := payload.ListenSeconds
 	if listenSeconds < 0 {
 		listenSeconds = 0
@@ -105,6 +119,9 @@ func normalizeConfig(raw string) (normalizedConfig, error) {
 		ShouldListen:   shouldListen,
 		ReadLimit:      readLimit,
 		ListenDuration: listenDuration,
+		FilterChat:     filterChat,
+		IncludeFromMe:  includeFromMe,
+		IncludeSet:     includeSet,
 	}, nil
 }
 
@@ -115,11 +132,6 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 	goMessage := C.GoString(message)
 
 	resp := &Response{Status: "ok"}
-	if goPhone == "" {
-		resp.Status = "error"
-		resp.Error = "phone number is required"
-		return marshalResponse(resp)
-	}
 
 	cfg, err := normalizeConfig(goMessage)
 	if err != nil {
@@ -128,10 +140,19 @@ func WaRun(dbURI, phone, message *C.char) *C.char {
 		return marshalResponse(resp)
 	}
 
+	if goPhone == "" && cfg.FilterChat == "" {
+		resp.Status = "error"
+		resp.Error = "phone number or filter_chat is required"
+		return marshalResponse(resp)
+	}
+
 	waConfig := waclient.Config{
-		DatabaseURI: goDBURI,
-		PhoneNumber: goPhone,
-		ReadLimit:   cfg.ReadLimit,
+		DatabaseURI:      goDBURI,
+		PhoneNumber:      goPhone,
+		Chat:             cfg.FilterChat,
+		ReadLimit:        cfg.ReadLimit,
+		IncludeFromMe:    cfg.IncludeFromMe,
+		IncludeFromMeSet: cfg.IncludeSet,
 	}
 	if cfg.ShouldSend {
 		waConfig.Message = cfg.SendText
