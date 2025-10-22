@@ -1,0 +1,51 @@
+name: Validate version bump
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ensure-version-change:
+    name: Ensure package version changed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch main branch
+        run: git fetch origin main --depth=1
+
+      - name: Compare project version
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          import tomllib
+
+          def read_version(rev: str) -> str | None:
+              try:
+                  blob = subprocess.check_output(['git', 'show', f'{rev}:pyproject.toml'])
+              except subprocess.CalledProcessError:
+                  return None
+              data = tomllib.loads(blob.decode('utf-8'))
+              return data.get('project', {}).get('version')
+
+          head_version = read_version('HEAD')
+          if not head_version:
+              print('Unable to read version from HEAD')
+              sys.exit(1)
+
+          base_version = read_version('origin/main')
+          if base_version is None:
+              print('No baseline version found on origin/main; skipping check.')
+              sys.exit(0)
+
+          if head_version == base_version:
+              print('The pyproject.toml version must be bumped for every merge into main.')
+              sys.exit(1)
+
+          print(f'Version check passed: {base_version} -> {head_version}')
+          PY
